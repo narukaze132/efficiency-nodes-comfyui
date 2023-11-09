@@ -6,6 +6,7 @@ import numpy as np
 import os
 import sys
 import io
+import warnings
 from contextlib import contextmanager
 import json
 import folder_paths
@@ -367,7 +368,7 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
         # Add support for Lora Block Weight, if Inspire Pack is installed
         if len(lbw) > 0:
             if 'LoraLoaderBlockWeight //Inspire' not in nodes.NODE_CLASS_MAPPINGS:
-                print('LBW provided but Inspire Pack not installed, ignoring')
+                warnings.warn('LBW provided but Inspire Pack not installed, ignoring')
                 lora_model, lora_clip = default_lora()
             else:
                 # quickly assign the variables based on different lengths
@@ -382,12 +383,12 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
                     case [lbw_vec, lbw_a]:
                         inverse = False
                         seed = 0
-                        lbw_b = 1.0
+                        lbw_b = None
                     case [lbw_vec]:
                         inverse = False
                         seed = 0
-                        lbw_a = 4.0
-                        lbw_b = 1.0
+                        lbw_a = None
+                        lbw_b = None
                 cls = nodes.NODE_CLASS_MAPPINGS['LoraLoaderBlockWeight //Inspire']
                 lora_model, lora_clip, _ = cls().doit(ckpt, clip, lora_name, strength_model, strength_clip, inverse, seed, lbw_a, lbw_b, "", lbw_vec)
         else:
@@ -397,7 +398,7 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
         return recursive_load_lora(lora_params[1:], lora_model, lora_clip, id, ckpt_cache, cache_overwrite, folder_paths)
 
     # Unpack lora parameters from the first element of the list for now
-    lora_name, strength_model, strength_clip = lora_params[0]
+    lora_name, strength_model, strength_clip, *lbw = lora_params[0]
     ckpt, clip, _ = load_checkpoint(ckpt_name, id, cache=ckpt_cache)
 
     lora_model, lora_clip = recursive_load_lora(lora_params, ckpt, clip, id, ckpt_cache, cache_overwrite, folder_paths)

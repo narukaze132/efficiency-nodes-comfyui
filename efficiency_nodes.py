@@ -334,6 +334,68 @@ class TSC_LoRA_Stacker:
 
         return (loras,)
 
+########################################################################################################################
+# TSC LoRA Stacker with Block Weight
+
+class TSC_LBW_Stacker:
+    @classmethod
+    def INPUT_TYPES(cls):
+        def load_lbw_preset(filename):
+            path = os.path.join(os.path.dirname(__file__), "ComfyUI-Inspire-Pack/resources", filename)
+            preset_list = []
+
+            if os.path.exists(path):
+                with open(path, 'r') as file:
+                    for line in file:
+                        preset_list.append(line.strip())
+
+                return preset_list
+            else:
+                return []
+        
+        preset = ["Preset"]
+        preset += load_lbw_preset("lbw_preset.txt")
+        preset += load_lbw_preset("lbw_preset.custom.txt")
+        preset = [name for name in preset if not name.startswith('@')]
+        
+        loras = ["None"] + folder_paths.get_filename_list('loras')
+        lora_dirs = [os.path.dirname(name) for name in loras]
+        lora_dirs = ["All"] + list(set(lora_dirs))
+        
+        return {
+            "required": {
+                "category_filter": (lora_dirs,),
+                "lora_name": (loras,),
+                "model_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "clip_strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "inverse": ("BOOLEAN", {"default": False, "label_on": "True", "label_off": "False"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "A": ("FLOAT", {"default": 4.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "B": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+                "preset": (preset,),
+                "block_vector": ("STRING", {"multiline": True, "placeholder": "block weight vectors", "default": "1,0,0,0,0,0,0,0,1,1,1,1,1,1,1,1,1", "pysssss.autocomplete": False}),
+            },
+            "optional": {
+                "lora_stack": ("LORA_STACK",)
+            }
+        }
+
+    RETURN_TYPES = ("LORA_STACK",)
+    RETURN_NAMES = ("LORA_STACK",)
+    FUNCTION = "lbw_stacker"
+    CATEGORY = "Efficiency Nodes/Stackers"
+    
+    def lbw_stacker(self, lora_name, model_strength, clip_strength, inverse, seed, A, B, preset, block_vector, lora_stack=None):
+        if model_strength == 0 and clip_strength == 0:
+            return (lora_stack,)
+        lora_params = (lora_name, model_strength, clip_strength, block_vector, A, B, seed, inverse)
+        loras = [lora_params]
+        
+        if lora_stack is not None:
+            loras.extend([l for l in lora_stack if l[0] != "None"])
+        
+        return (loras,)
+
 #=======================================================================================================================
 # TSC Control Net Stacker
 class TSC_Control_Net_Stacker:
@@ -4147,6 +4209,7 @@ NODE_CLASS_MAPPINGS = {
     "Efficient Loader": TSC_EfficientLoader,
     "Eff. Loader SDXL": TSC_EfficientLoaderSDXL,
     "LoRA Stacker": TSC_LoRA_Stacker,
+    "TSC_LBW_Stacker": TSC_LBW_Stacker,
     "Control Net Stacker": TSC_Control_Net_Stacker,
     "Apply ControlNet Stack": TSC_Apply_ControlNet_Stack,
     "Unpack SDXL Tuple": TSC_Unpack_SDXL_Tuple,
@@ -4176,6 +4239,10 @@ NODE_CLASS_MAPPINGS = {
     "Noise Control Script": TSC_Noise_Control_Script,
     "HighRes-Fix Script": TSC_HighRes_Fix,
     "Tiled Upscaler Script": TSC_Tiled_Upscaler
+}
+# display name mapping only used for LBW stacker
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "TSC_LBW_Stacker": "LoRA Block Weight Stacker"
 }
 
 ########################################################################################################################
