@@ -9,6 +9,7 @@ import io
 from contextlib import contextmanager
 import json
 import folder_paths
+import nodes
 
 # Get the absolute path of the parent directory of the current script
 my_dir = os.path.dirname(os.path.abspath(__file__))
@@ -175,7 +176,7 @@ def print_loaded_objects_entries(id=None, prompt=None, show_id=False):
                     print(f"  [{i}] base_ckpt: {base_ckpt_name} (ids: {associated_ids})")
                 else:
                     print(f"  [{i}] base_ckpt: {base_ckpt_name}")
-                for name, strength_model, strength_clip in entry[0]:
+                for name, strength_model, strength_clip, *lbw in entry[0]:
                     lora_model_info = f"{os.path.splitext(os.path.basename(name))[0]}({round(strength_model, 2)},{round(strength_clip, 2)})"
                     print(f"      lora(mod,clip): {lora_model_info}")
             else:
@@ -354,13 +355,43 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
         if len(lora_params) == 0:
             return ckpt, clip
 
-        lora_name, strength_model, strength_clip = lora_params[0]
+        lora_name, strength_model, strength_clip, *lbw = lora_params[0]
         if os.path.isabs(lora_name):
             lora_path = lora_name
         else:
             lora_path = folder_paths.get_full_path("loras", lora_name)
-
-        lora_model, lora_clip = comfy.sd.load_lora_for_models(ckpt, clip, comfy.utils.load_torch_file(lora_path), strength_model, strength_clip)
+        
+        def default_lora():
+            return comfy.sd.load_lora_for_models(ckpt, clip, comfy.utils.load_torch_file(lora_path), strength_model, strength_clip)
+        
+        # Add support for Lora Block Weight, if Inspire Pack is installed
+        if len(lbw) > 0:
+            if 'LoraLoaderBlockWeight //Inspire' not in nodes.NODE_CLASS_MAPPINGS:
+                print('LBW provided but Inspire Pack not installed, ignoring')
+                lora_model, lora_clip = default_lora()
+            else:
+                # quickly assign the variables based on different lengths
+                match lbw:
+                    case [lbw_vec, lbw_a, lbw_b, seed, inverse]:
+                        pass
+                    case [lbw_vec, lbw_a, lbw_b, seed]:
+                        inverse = False
+                    case [lbw_vec, lbw_a, lbw_b]:
+                        inverse = False
+                        seed = 0
+                    case [lbw_vec, lbw_a]:
+                        inverse = False
+                        seed = 0
+                        lbw_b = 1.0
+                    case [lbw_vec]:
+                        inverse = False
+                        seed = 0
+                        lbw_a = 4.0
+                        lbw_b = 1.0
+                cls = nodes.NODE_CLASS_MAPPINGS['LoraLoaderBlockWeight //Inspire']
+                lora_model, lora_clip, _ = cls().doit(ckpt, clip, lora_name, strength_model, strength_clip, inverse, seed, lbw_a, lbw_b, "", lbw_vec)
+        else:
+            lora_model, lora_clip = default_lora()
 
         # Call the function again with the new lora_model and lora_clip and the remaining tuples
         return recursive_load_lora(lora_params[1:], lora_model, lora_clip, id, ckpt_cache, cache_overwrite, folder_paths)
