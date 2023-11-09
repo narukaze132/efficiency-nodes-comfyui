@@ -316,6 +316,22 @@ def load_vae(vae_name, id, cache=None, cache_overwrite=False):
 
     return vae
 
+# moved this out of load_lora so LoRA stacking could be used independently of loading models
+def recursive_load_lora(lora_params, ckpt, clip, id, ckpt_cache=None, cache_overwrite=False, folder_paths=folder_paths):
+    if len(lora_params) == 0:
+        return ckpt, clip
+
+    lora_name, strength_model, strength_clip = lora_params[0]
+    if os.path.isabs(lora_name):
+        lora_path = lora_name
+    else:
+        lora_path = folder_paths.get_full_path("loras", lora_name)
+
+    lora_model, lora_clip = comfy.sd.load_lora_for_models(ckpt, clip, comfy.utils.load_torch_file(lora_path), strength_model, strength_clip)
+
+    # Call the function again with the new lora_model and lora_clip and the remaining tuples
+    return recursive_load_lora(lora_params[1:], lora_model, lora_clip, id, ckpt_cache, cache_overwrite, folder_paths)
+
 def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_overwrite=False):
     global loaded_objects
 
@@ -349,21 +365,6 @@ def load_lora(lora_params, ckpt_name, id, cache=None, ckpt_cache=None, cache_ove
                         ckpt_ids.append(id)
 
             return lora_model, lora_clip
-
-    def recursive_load_lora(lora_params, ckpt, clip, id, ckpt_cache, cache_overwrite, folder_paths):
-        if len(lora_params) == 0:
-            return ckpt, clip
-
-        lora_name, strength_model, strength_clip = lora_params[0]
-        if os.path.isabs(lora_name):
-            lora_path = lora_name
-        else:
-            lora_path = folder_paths.get_full_path("loras", lora_name)
-
-        lora_model, lora_clip = comfy.sd.load_lora_for_models(ckpt, clip, comfy.utils.load_torch_file(lora_path), strength_model, strength_clip)
-
-        # Call the function again with the new lora_model and lora_clip and the remaining tuples
-        return recursive_load_lora(lora_params[1:], lora_model, lora_clip, id, ckpt_cache, cache_overwrite, folder_paths)
 
     # Unpack lora parameters from the first element of the list for now
     lora_name, strength_model, strength_clip = lora_params[0]

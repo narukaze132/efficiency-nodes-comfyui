@@ -28,9 +28,9 @@ font_path = os.path.join(my_dir, 'arial.ttf')
 
 # Append comfy_dir to sys.path & import files
 sys.path.append(comfy_dir)
-from nodes import LatentUpscaleBy, KSampler, KSamplerAdvanced, VAEDecode, VAEDecodeTiled, VAEEncode, VAEEncodeTiled, \
+from nodes import LatentUpscaleBy, KSampler, KSamplerAdvanced, VAEDecode, VAEDecodeTiled, VAEEncode, VAEEncodeTiled, VAEEncodeForInpaint, \
     ImageScaleBy, CLIPSetLastLayer, CLIPTextEncode, ControlNetLoader, ControlNetApply, ControlNetApplyAdvanced, \
-    PreviewImage, MAX_RESOLUTION
+    PreviewImage, ImagePadForOutpaint, MAX_RESOLUTION
 from comfy_extras.nodes_upscale_model import UpscaleModelLoader, ImageUpscaleWithModel
 from comfy_extras.nodes_clip_sdxl import CLIPTextEncodeSDXL, CLIPTextEncodeSDXLRefiner
 import comfy.sample
@@ -335,6 +335,37 @@ class TSC_LoRA_Stacker:
         return (loras,)
 
 #=======================================================================================================================
+# TSC Apply LoRA Stack
+
+class TSC_Apply_LoRA_Stack:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+            },
+            "optional": {
+                "lora_stack": ("LORA_STACK",),
+            },
+            "hidden": {
+                "my_unique_id": "UNIQUE_ID",
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "CLIP")
+    RETURN_NAMES = ("model", "clip")
+    FUNCTION = "apply_lora_stack"
+    CATEGORY = "Efficiency Nodes/Stackers"
+
+    def apply_lora_stack(self, model, clip, lora_stack=None, my_unique_id=None):
+        if lora_stack:
+            return (model, clip)
+
+        lora_model, lora_clip = recursive_load_lora(lora_stack, model, clip, my_unique_id)
+        return (lora_model, lora_clip)
+
+#=======================================================================================================================
 # TSC Control Net Stacker
 class TSC_Control_Net_Stacker:
 
@@ -562,6 +593,35 @@ class TSC_KSampler:
                     store_ksampler_results("latent", my_unique_id, samples, parameters)
 
                 # ------------------------------------------------------------------------------------------------------
+                # Check if "outpaint" exists in the script after main sampling has taken place, but before high-res pass
+                if keys_exist_in_script("outpaint"):
+                    paint_left, paint_top, paint_right, paint_bottom, feathering, use_same_seed, paint_seed, paint_steps, paint_sampler, paint_scheduler, iterations, inpaint_controlnet, paint_controlnet_strength = script["outpaint"]
+                    paint_seed = seed if use_same_seed else paint_seed
+                    def make_outpaint_imgs(samples):
+                        return ImagePadForOutpaint().expand_image(vae_decode_latent(vae, samples, vae_decode), paint_left, paint_top, paint_bottom, paint_right, feathering)
+                    def outpaint_sample(latent, positive, negative):
+                        return KSampler().sample(model, paint_seed, paint_steps, cfg, paint_sampler, paint_scheduler, positive, negative, latent, denoise=1.0)[0]
+                    if paint_controlnet is not None:
+                        if not cn_preprocessors_provided:
+                            raise RuntimeError('Need to have comfyui_controlnet_aux installed to use inpaint models with outpainting script')
+                        else:
+                            with suppress_output():
+                                InpaintPreprocessor = getattr(import_module('comfyui_controlnet_aux.__init__'), 'InpaintPreprocessor')
+                            for _ in range(iterations):
+                                outpaint_imgs, outpaint_masks = make_outpaint_imgs(samples)
+                                out_batch, out_height, out_width, out_chan = outpaint_imgs.size()
+                                processed_imgs = InpaintPreprocessor().execute(outpaint_imgs, outpaint_masks)
+                                paint_positive = ControlNetApply().apply_controlnet(positive, inpaint_controlnet, processed_imgs)
+                                empty_latent = torch.zeros([out_batch, out_chan, out_height // 8, out_width // 8]).cpu()
+                                samples = outpaint_sample(empty_latent, paint_positive, negative)
+                    else:
+                        for _ in range(iterations):
+                            outpaint_imgs, outpaint_masks = make_outpaint_imgs(samples)
+                            latent = VAEEncodeForInpaint().encode(vae, outpaint_imgs, outpaint_masks, grow_mask_by=0)[0]
+                            samples = outpaint_sample(latent, positive, negative)
+                    images = None
+
+                # ------------------------------------------------------------------------------------------------------
                 # Check if "hiresfix" exists in the script after main sampling has taken place
                 if keys_exist_in_script("hiresfix"):
                     # Unpack the tuple from the script's "hiresfix" key
@@ -653,7 +713,7 @@ class TSC_KSampler:
                     if images is None:
                         images = vae_decode_latent(vae, samples, vae_decode)
                         # Store decoded image as base image of no script is detected
-                        if all(not keys_exist_in_script(key) for key in ["xyplot", "hiresfix", "tile", "anim"]):
+                        if all(not keys_exist_in_script(key) for key in ["xyplot", "hiresfix", "tile", "anim","outpaint"]):
                             store_ksampler_results("image", my_unique_id, images)
 
                 # Append Control Net Images (if exist)
@@ -3961,7 +4021,7 @@ class TSC_Noise_Control_Script:
 ########################################################################################################################
 # Add controlnet options if have controlnet_aux installed (https://github.com/Fannovel16/comfyui_controlnet_aux)
 use_controlnet_widget = preprocessor_widget = (["_"],)
-if os.path.exists(os.path.join(custom_nodes_dir, "comfyui_controlnet_aux")):
+if cn_preprocessors_provided := os.path.exists(os.path.join(custom_nodes_dir, "comfyui_controlnet_aux")):
     printout = "Attempting to add Control Net options to the 'HiRes-Fix Script' Node (comfyui_controlnet_aux add-on)..."
     #print(f"{message('Efficiency Nodes:')} {printout}", end="", flush=True)
 
@@ -4105,6 +4165,50 @@ class TSC_HighRes_Fix:
         return (script,)
 
 ########################################################################################################################
+# TSC Outpainting Script (by Yu Narukaze)
+
+class TSC_Outpaint:
+    @classmethod
+    def INPUT_TYPES(cls):
+        cnet_inpaint_filenames = [name for name in folder_paths.get_filename_list("controlnet") if "inpaint" in name]
+        required = ImagePadForOutpaint.INPUT_TYPES()["required"]
+        del required["image"]
+        
+        # add options for seed, sampler, scheduler, etc. since outpainting frequently has different needs for that
+        required.update({
+            "use_same_seed": ("BOOLEAN", {"default": True}),
+            "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+            "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+            "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+            "iterations": ("INT", {"default": 1, "min": 0, "max": 5, "step": 1}),
+        })
+        
+        # option to use ControlNet inpaint model (which completely overrides normal functionality)
+        required.update({
+            "use_controlnet": use_controlnet_widget,
+            "inpaint_controlnet": (cnet_inpaint_filenames,),
+            "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+        })
+        return {
+            "required": required,
+            "optional": {"script": ("SCRIPT",)}
+        }
+    
+    RETURN_TYPES = ("SCRIPT",)
+    FUNCTION = "outpaint_script"
+    CATEGORY = "Efficiency Nodes/Scripts"
+    
+    def outpaint_script(self, left, top, right, bottom, feathering, use_same_seed, seed, steps, cfg, sampler_name, scheduler,
+                        iterations, use_controlnet, inpaint_controlnet, strength, script=None):
+        if iterations > 0 and any(x > 0 for x in (left, top, right, bottom)):
+            script = script or {}
+            inpaint_controlnet = ControlNetLoader().load_controlnet(inpaint_controlnet)[0] if use_controlnet else None
+            script["outpaint"] = (left, top, right, bottom, feathering, use_same_seed, seed, steps, sampler_name,
+                                  scheduler, iterations, inpaint_controlnet, strength)
+        return (script,)
+
+########################################################################################################################
 # TSC Tiled Upscaler (https://github.com/BlenderNeko/ComfyUI_TiledKSampler)
 class TSC_Tiled_Upscaler:
     @classmethod
@@ -4175,7 +4279,8 @@ NODE_CLASS_MAPPINGS = {
     "Image Overlay": TSC_ImageOverlay,
     "Noise Control Script": TSC_Noise_Control_Script,
     "HighRes-Fix Script": TSC_HighRes_Fix,
-    "Tiled Upscaler Script": TSC_Tiled_Upscaler
+    "Tiled Upscaler Script": TSC_Tiled_Upscaler,
+    "Outpaint Script": TSC_Outpaint,
 }
 
 ########################################################################################################################
